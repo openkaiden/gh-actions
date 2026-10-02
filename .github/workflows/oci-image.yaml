@@ -1,0 +1,101 @@
+#
+# Copyright (C) 2026 Red Hat, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: oci-image
+
+on:
+  workflow_call:
+    inputs:
+      push:
+        required: false
+        type: boolean
+        default: false
+        description: 'Push the image to ghcr.io and attest it'
+
+# No permissions block: the job runs with what the calling workflow grants.
+# Declaring packages/attestations/id-token here would make read-only callers fail at startup.
+
+jobs:
+  build:
+    name: Build OCI image
+    runs-on: ubuntu-26.04
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # qemu-user-binfmt is the ubuntu-26.04 package (qemu-user-static on 24.04)
+      - name: Install qemu dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-binfmt
+
+      - name: Build image
+        id: build-image
+        uses: redhat-actions/buildah-build@719e3c40d8af9790c23eca13f7daa339f2867034 # v3.1.0
+        with:
+          image: ${{ github.event.repository.name }}
+          tags: next ${{ github.sha }}
+          platforms: linux/amd64, linux/arm64
+          containerfiles: |
+            ./Containerfile
+          context: .
+          oci: true
+
+      # Convention: optional tests/setup.sh in the calling repository prepares the runner (once)
+      - name: Set up test environment
+        run: |
+          [[ -f tests/setup.sh ]] || { echo "no tests/setup.sh, skipping"; exit 0; }
+          bash tests/setup.sh
+
+      # Convention: optional tests/test.sh in the calling repository tests the image (once per platform)
+      - name: Test image
+        env:
+          IMAGE: ${{ github.event.repository.name }}:next
+        run: |
+          [[ -f tests/test.sh ]] || { echo "no tests/test.sh, skipping"; exit 0; }
+          for platform in linux/amd64 linux/arm64; do
+            echo "::group::Testing ${platform}"
+            PLATFORM="${platform}" bash tests/test.sh
+            echo "::endgroup::"
+          done
+
+      - name: Log in to ghcr.io
+        if: ${{ inputs.push }}
+        uses: redhat-actions/podman-login@50c2d9a331bb67c8fdab99b86455fad05e2e3252 # v2.0
+        with:
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+          registry: ghcr.io
+
+      - name: Push to ghcr.io
+        if: ${{ inputs.push }}
+        id: push-to-ghcr
+        uses: redhat-actions/push-to-registry@94ade333c38ecc0e60e94785125d9a52ca423b37 # v3.0.0
+        with:
+          image: ${{ steps.build-image.outputs.image }}
+          tags: ${{ steps.build-image.outputs.tags }}
+          registry: ghcr.io/${{ github.repository_owner }}
+
+      - name: Generate artifact attestation
+        if: ${{ inputs.push }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+          subject-digest: ${{ steps.push-to-ghcr.outputs.digest }}
+          push-to-registry: true
