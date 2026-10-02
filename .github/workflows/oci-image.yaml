@@ -39,6 +39,15 @@ jobs:
         with:
           persist-credentials: false
 
+      # Lint the optional test scripts of the calling repository (pull requests only)
+      - name: Lint test scripts
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          for script in tests/setup.sh tests/test.sh; do
+            [[ -f "${script}" ]] || continue
+            shellcheck "${script}"
+          done
+
       # qemu-user-binfmt is the ubuntu-26.04 package (qemu-user-static on 24.04)
       - name: Install qemu dependency
         run: |
